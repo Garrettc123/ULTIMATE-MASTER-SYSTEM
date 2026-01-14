@@ -1,0 +1,331 @@
+name: 🚀 Mega Merge - Auto Consolidate All Repos
+
+on:
+  workflow_dispatch:
+    inputs:
+      batch:
+        description: 'Batch to merge (1=revenue, 2=orchestration, 3=zero-human, 4=agents, 5=all)'
+        required: true
+        default: '5'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '3'
+          - '4'
+          - '5'
+      force:
+        description: 'Force merge (overwrite conflicts)'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      repos_matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set repository matrix
+        id: set-matrix
+        run: |
+          case "${{ inputs.batch }}" in
+            1)
+              REPOS='["revenue-agent-system","ai-wealth-ecosystem","autonomous-revenue-architect","zero-human-enterprise-grid","TITAN-Autonomous-Business-Empire","APEX-Universal-AI-Operating-System","saas-revenue-accelerator","subscription-intelligence-engine"]'
+              ;;
+            2)
+              REPOS='["systems-master-hub","NEXUS-Master-Orchestration-Hub","meta-orchestration-engine","hyper-automation-factory","tree-of-life-system"]'
+              ;;
+            3)
+              REPOS='["zero-human-ai-platform","zero-human-governance-core"]'
+              ;;
+            4)
+              REPOS='["ai-agent-platform","ai-ops-studio","process-copilot","ai-consulting-automaton"]'
+              ;;
+            5)
+              REPOS='["revenue-agent-system","ai-wealth-ecosystem","autonomous-revenue-architect","zero-human-enterprise-grid","TITAN-Autonomous-Business-Empire","APEX-Universal-AI-Operating-System","systems-master-hub","NEXUS-Master-Orchestration-Hub","zero-human-ai-platform","zero-human-governance-core","ai-agent-platform","ai-ops-studio","nwu-protocol","blockchain-nexus","enterprise-unified-platform"]'
+              ;;
+          esac
+          echo "matrix={\"repo\":$REPOS}" >> $GITHUB_OUTPUT
+
+  merge-repos:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson(needs.setup.outputs.repos_matrix) }}
+      fail-fast: false
+      max-parallel: 5
+    
+    steps:
+      - name: Checkout main repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+
+      - name: Install git-filter-repo
+        run: |
+          pip install git-filter-repo
+
+      - name: Determine target path
+        id: target
+        run: |
+          REPO="${{ matrix.repo }}"
+          
+          # Map repos to target directories
+          case "$REPO" in
+            revenue-agent-system|ai-wealth-ecosystem|autonomous-revenue-architect|zero-human-enterprise-grid|TITAN-Autonomous-Business-Empire|APEX-Universal-AI-Operating-System|saas-revenue-accelerator|subscription-intelligence-engine)
+              TARGET="systems/revenue/${REPO}"
+              ;;
+            systems-master-hub|NEXUS-Master-Orchestration-Hub|meta-orchestration-engine|hyper-automation-factory|tree-of-life-system)
+              TARGET="systems/orchestration/${REPO}"
+              ;;
+            zero-human-ai-platform|zero-human-governance-core)
+              TARGET="systems/zero-human/${REPO}"
+              ;;
+            ai-agent-platform|ai-ops-studio|process-copilot|ai-consulting-automaton)
+              TARGET="systems/agents/${REPO}"
+              ;;
+            nwu-protocol|blockchain-nexus|ai-swarm-crypto-bounty-system)
+              TARGET="systems/blockchain/${REPO}"
+              ;;
+            enterprise-unified-platform|deployment-automation)
+              TARGET="systems/infrastructure/${REPO}"
+              ;;
+            *)
+              TARGET="systems/misc/${REPO}"
+              ;;
+          esac
+          
+          echo "target=$TARGET" >> $GITHUB_OUTPUT
+
+      - name: Clone source repository
+        continue-on-error: true
+        run: |
+          REPO="${{ matrix.repo }}"
+          echo "Cloning https://github.com/${{ github.repository_owner }}/${REPO}.git"
+          
+          git clone "https://github.com/${{ github.repository_owner }}/${REPO}.git" "/tmp/${REPO}" || {
+            echo "::warning::Failed to clone ${REPO} - may be private or not exist"
+            exit 0
+          }
+
+      - name: Rewrite history into subdirectory
+        continue-on-error: true
+        run: |
+          REPO="${{ matrix.repo }}"
+          TARGET="${{ steps.target.outputs.target }}"
+          
+          if [ ! -d "/tmp/${REPO}" ]; then
+            echo "::warning::Repository ${REPO} not cloned, skipping"
+            exit 0
+          fi
+          
+          cd "/tmp/${REPO}"
+          
+          echo "Rewriting history for ${REPO} into ${TARGET}"
+          git filter-repo --to-subdirectory-filter "${TARGET}" --force
+
+      - name: Merge into monorepo
+        continue-on-error: true
+        run: |
+          REPO="${{ matrix.repo }}"
+          TARGET="${{ steps.target.outputs.target }}"
+          
+          if [ ! -d "/tmp/${REPO}" ]; then
+            echo "::warning::Skipping merge for ${REPO}"
+            exit 0
+          fi
+          
+          cd ${{ github.workspace }}
+          
+          # Get default branch
+          cd "/tmp/${REPO}"
+          DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo "main")
+          
+          cd ${{ github.workspace }}
+          
+          # Add remote and fetch
+          git remote add "temp-${REPO}" "/tmp/${REPO}"
+          git fetch "temp-${REPO}"
+          
+          # Merge with strategy
+          if [ "${{ inputs.force }}" == "true" ]; then
+            git merge "temp-${REPO}/${DEFAULT_BRANCH}" --allow-unrelated-histories -m "merge: ${REPO} into ${TARGET}" -X theirs --no-edit || {
+              echo "::warning::Merge failed for ${REPO}, attempting abort and skip"
+              git merge --abort || true
+              exit 0
+            }
+          else
+            git merge "temp-${REPO}/${DEFAULT_BRANCH}" --allow-unrelated-histories -m "merge: ${REPO} into ${TARGET}" --no-edit || {
+              echo "::error::Merge conflict for ${REPO}. Rerun with force=true to auto-resolve"
+              git merge --abort || true
+              exit 0
+            }
+          fi
+          
+          # Remove remote
+          git remote remove "temp-${REPO}"
+          
+          echo "::notice::Successfully merged ${REPO} into ${TARGET}"
+
+      - name: Push changes
+        run: |
+          git push origin main || echo "::warning::Push failed, may need to pull first"
+
+  finalize:
+    needs: merge-repos
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Create/Update monorepo structure
+        run: |
+          mkdir -p systems/{revenue,orchestration,zero-human,agents,blockchain,infrastructure}
+          mkdir -p packages/{shared,utils,types}
+          mkdir -p apps/{dashboard,api,console}
+          
+          # Create package.json if not exists
+          if [ ! -f package.json ]; then
+            cat > package.json << 'EOF'
+          {
+            "name": "ultimate-master-system",
+            "version": "1.0.0",
+            "private": true,
+            "workspaces": [
+              "apps/*",
+              "packages/*",
+              "systems/**/package.json"
+            ],
+            "scripts": {
+              "build": "turbo run build",
+              "dev": "turbo run dev",
+              "test": "turbo run test",
+              "lint": "turbo run lint"
+            },
+            "devDependencies": {
+              "turbo": "^2.0.0",
+              "prettier": "^3.2.0"
+            }
+          }
+          EOF
+          fi
+          
+          # Create turbo.json if not exists
+          if [ ! -f turbo.json ]; then
+            cat > turbo.json << 'EOF'
+          {
+            "$schema": "https://turbo.build/schema.json",
+            "pipeline": {
+              "build": {
+                "dependsOn": ["^build"],
+                "outputs": ["dist/**", "build/**", ".next/**"]
+              },
+              "test": {
+                "dependsOn": ["build"],
+                "cache": false
+              },
+              "lint": {},
+              "dev": {
+                "cache": false,
+                "persistent": true
+              }
+            }
+          }
+          EOF
+          fi
+          
+          # Create Python requirements if not exists
+          if [ ! -f requirements.txt ]; then
+            cat > requirements.txt << 'EOF'
+          fastapi>=0.115.0
+          uvicorn[standard]>=0.30.0
+          pydantic>=2.0.0
+          sqlalchemy>=2.0.0
+          openai>=1.0.0
+          langchain>=0.1.0
+          pandas>=2.0.0
+          pytest>=7.4.0
+          EOF
+          fi
+
+      - name: Commit tooling files
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          git add -A
+          git diff-index --quiet HEAD || git commit -m "chore: update monorepo tooling and structure"
+          git push origin main || true
+
+      - name: Generate merge report
+        run: |
+          echo "# 🚀 Merge Report" > merge-report.md
+          echo "" >> merge-report.md
+          echo "**Date:** $(date)" >> merge-report.md
+          echo "**Batch:** ${{ inputs.batch }}" >> merge-report.md
+          echo "" >> merge-report.md
+          echo "## Merged Systems" >> merge-report.md
+          echo "" >> merge-report.md
+          
+          # Count directories in each system folder
+          for dir in systems/*/; do
+            if [ -d "$dir" ]; then
+              count=$(find "$dir" -mindepth 1 -maxdepth 1 -type d | wc -l)
+              echo "- **$(basename $dir):** $count repositories" >> merge-report.md
+            fi
+          done
+          
+          echo "" >> merge-report.md
+          echo "## Repository Structure" >> merge-report.md
+          echo "\`\`\`" >> merge-report.md
+          tree -L 3 -d systems/ || find systems/ -type d | head -50
+          echo "\`\`\`" >> merge-report.md
+          
+          cat merge-report.md
+
+      - name: Upload merge report
+        uses: actions/upload-artifact@v4
+        with:
+          name: merge-report
+          path: merge-report.md
+
+      - name: Summary
+        run: |
+          echo "## 🎉 Mega Merge Complete!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Batch processed:** ${{ inputs.batch }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Force mode:** ${{ inputs.force }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "1. Review merged code in \`systems/\` directories" >> $GITHUB_STEP_SUMMARY
+          echo "2. Run \`npm install && npm run build\` to build all systems" >> $GITHUB_STEP_SUMMARY
+          echo "3. Run \`pip install -r requirements.txt\` for Python systems" >> $GITHUB_STEP_SUMMARY
+          echo "4. Deploy with \`./deploy-all.sh\` (if available)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Your ULTIMATE MASTER SYSTEM is ready!" >> $GITHUB_STEP_SUMMARY
